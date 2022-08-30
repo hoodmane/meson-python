@@ -491,9 +491,12 @@ class Project():
             setup_args.insert(0, '--reconfigure')
 
         try:
+            pyodide_root = pathlib.Path(os.environ['PYODIDE_ROOT']) 
+            cross_file = str(pyodide_root / "tools/emscripten.meson.cross")
             self._meson(
                 'setup',
-                f'--native-file={os.fspath(self._meson_native_file)}',
+                # f'--native-file={os.fspath(self._meson_native_file)}',
+                f"--cross-file={cross_file}",
                 # TODO: Allow configuring these arguments
                 '-Ddebug=false',
                 '-Doptimization=2',
