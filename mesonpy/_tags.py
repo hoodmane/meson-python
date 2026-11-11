@@ -59,13 +59,22 @@ def get_abi_tag() -> str:
     # Using $EXT_SUFFIX will not break when PyPy will fix this.
     # See https://foss.heptapod.net/pypy/pypy/-/issues/3816 and
     # https://github.com/pypa/packaging/pull/607.
-    parts = str(sysconfig.get_config_var('EXT_SUFFIX')).split('.')
+    abi = abi_tag_from_extension_suffix(str(sysconfig.get_config_var('EXT_SUFFIX')))
 
     # Some Python distributions (notably pkgsrc, the default NetBSD
     # package manager) patch the Python configure script to remove
     # $SOABI from $EXT_SUFFIX.
-    if len(parts) < 3:
+    if abi is None:
         return _get_cpython_abi()
+
+    return abi
+
+
+def abi_tag_from_extension_suffix(ext_suffix: str) -> str | None:
+    """Derive the ABI tag from an $EXT_SUFFIX value, or None if it carries no ABI information."""
+    parts = ext_suffix.split('.')
+    if len(parts) < 3:
+        return None
 
     # The packaging module initially based his understanding of the
     # $SOABI variable on the inconsistent value reported by PyPy, and

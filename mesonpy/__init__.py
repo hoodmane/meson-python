@@ -51,6 +51,7 @@ import packaging.utils
 import packaging.version
 import pyproject_metadata
 
+import mesonpy._cross
 import mesonpy._rpath
 import mesonpy._tags
 import mesonpy._util
@@ -95,6 +96,8 @@ _NINJA_REQUIRED_VERSION = '1.8.2'
 
 # Keep in sync with the version requirement in pyproject.toml
 _MESON_REQUIRED_VERSION = '0.64.0' if sys.version_info < (3, 12) else '1.2.3'
+# Cross builds rely on the python.build_config option (PEP 739 support).
+_MESON_REQUIRED_VERSION_CROSS = '1.10.0'
 
 _MESON_ARGS_KEYS = ['dist', 'setup', 'compile', 'install']
 
@@ -351,21 +354,33 @@ class Metadata(pyproject_metadata.StandardMetadata):
         return self.canonical_name.replace('-', '_')
 
 
-def _is_native(file: Path) -> bool:
+def _binary_format() -> str:
+    """Binary format used by the platform we are running on."""
+    if sys.platform == 'darwin':
+        return 'macho'
+    if sys.platform == 'win32' or sys.platform == 'cygwin':
+        return 'pe'
+    # Assume that any other platform uses ELF binaries.
+    return 'elf'
+
+
+def _is_native(file: Path, binary_format: Optional[str] = None) -> bool:
     """Check if file is a native file."""
 
+    if binary_format is None:
+        binary_format = _binary_format()
+
     with open(file, 'rb') as f:
-        if sys.platform == 'darwin':
+        if binary_format == 'macho':
             return f.read(4) in (
                 b'\xfe\xed\xfa\xce',  # 32-bit
                 b'\xfe\xed\xfa\xcf',  # 64-bit
                 b'\xcf\xfa\xed\xfe',  # arm64
                 b'\xca\xfe\xba\xbe',  # universal / fat (same as java class so beware!)
             )
-        elif sys.platform == 'win32' or sys.platform == 'cygwin':
+        elif binary_format == 'pe':
             return f.read(2) == b'MZ'
         else:
-            # Assume that any other platform uses ELF binaries.
             return f.read(4) == b'\x7fELF'  # ELF
 
 
@@ -377,6 +392,11 @@ class _WheelBuilder():
     _manifest: Dict[str, List[_Entry]]
     _limited_api: bool
     _allow_windows_shared_libs: bool
+    _cross: Optional[mesonpy._cross.CrossBuild] = None
+
+    @property
+    def _binary_format(self) -> str:
+        return self._cross.binary_format if self._cross is not None else _binary_format()
 
     @property
     def _has_internal_libs(self) -> bool:
@@ -393,7 +413,7 @@ class _WheelBuilder():
         if self._manifest['platlib'] or self._manifest['mesonpy-libs']:
             return False
         for entry in self._manifest['scripts']:
-            if _is_native(entry.src):
+            if _is_native(entry.src, self._binary_format):
                 return False
         return True
 
@@ -407,8 +427,20 @@ class _WheelBuilder():
             # does not contain any extension module (does not
             # distribute any file in {platlib}) thus use generic
             # implementation and ABI tags.
-            return mesonpy._tags.Tag('py3', 'none', None)
-        return mesonpy._tags.Tag(None, self._stable_abi, None)
+            return mesonpy._tags.Tag('py3', 'none', self._platform_tag)
+        return mesonpy._tags.Tag(self._interpreter_tag, self._stable_abi or self._abi_tag, self._platform_tag)
+
+    @property
+    def _interpreter_tag(self) -> Optional[str]:
+        return self._cross.interpreter_tag if self._cross is not None else None
+
+    @property
+    def _abi_tag(self) -> Optional[str]:
+        return self._cross.abi_tag if self._cross is not None else None
+
+    @property
+    def _platform_tag(self) -> Optional[str]:
+        return self._cross.platform_tag if self._cross is not None else None
 
     @property
     def name(self) -> str:
@@ -465,12 +497,20 @@ class _WheelBuilder():
         # ABI, therefore extension modules using the limited API do
         # not use the stable ABI filename suffix and wheels should not
         # be tagged with the abi3 tag.
-        if self._limited_api and '__pypy__' not in sys.builtin_module_names:
+        if self._cross is not None:
+            is_pypy = self._cross.is_pypy
+            free_threaded = self._cross.is_free_threaded
+            version_info: Tuple[int, ...] = self._cross.version_info
+        else:
+            is_pypy = '__pypy__' in sys.builtin_module_names
+            free_threaded = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+            version_info = sys.version_info[:3]
+        if self._limited_api and not is_pypy:
             # On free-threaded Python 3.15 or later, we expect to be
             # building 'abi3t' wheels for the time being. In the future
             # we will want an option to target 'abi3t' from GIL-enabled
             # Python too.
-            abi3t = bool(sysconfig.get_config_var('Py_GIL_DISABLED')) and sys.version_info >= (3, 15)
+            abi3t = free_threaded and version_info >= (3, 15)
             expected_abi = 'abi3t' if abi3t else 'abi3'
 
             # Verify stable ABI compatibility: examine files installed
@@ -493,7 +533,11 @@ class _WheelBuilder():
                       install_rpath: List[str], build_rpath: List[str]) -> None:
         """Add a file to the wheel."""
 
-        if self._has_internal_libs and _is_native(origin):
+        if self._cross is not None and self._cross.binary_format != _binary_format():
+            # Fixing rpaths requires tooling for the host binary format;
+            # when it differs from the build platform's, leave them alone.
+            pass
+        elif self._has_internal_libs and _is_native(origin):
             libspath = os.path.relpath(self._libs_dir, destination.parent)
             mesonpy._rpath.fix_rpath(origin, install_rpath, build_rpath, libspath)
         elif install_rpath or build_rpath:
@@ -728,14 +772,17 @@ class Project():
                  source_dir: Path,
                  build_dir: Path,
                  meson_args: Optional[MesonArgs] = None,
-                 editable_verbose: Optional[bool] = None) -> None:
+                 editable_verbose: Optional[bool] = None,
+                 cross: Optional[mesonpy._cross.CrossBuild] = None) -> None:
 
         self._source_dir = pathlib.Path(source_dir).absolute()
         self._build_dir = pathlib.Path(build_dir).absolute()
         self._meson_native_file = self._build_dir / 'meson-python-native-file.ini'
         self._meson_cross_file = self._build_dir / 'meson-python-cross-file.ini'
+        self._meson_build_details = self._build_dir / 'meson-python-build-details.json'
         self._meson_args: MesonArgs = collections.defaultdict(list)
         self._limited_api = False
+        self._cross = cross
 
         # load pyproject.toml
         pyproject = tomllib.loads(self._source_dir.joinpath('pyproject.toml').read_text(encoding='utf-8'))
@@ -758,7 +805,9 @@ class Project():
                 self._meson_args[key].extend(value)
 
         # determine command to invoke meson
-        self._meson = _get_meson_command(pyproject_config.get('meson'))
+        self._meson = _get_meson_command(
+            pyproject_config.get('meson'),
+            version=_MESON_REQUIRED_VERSION_CROSS if self._cross is not None else _MESON_REQUIRED_VERSION)
 
         self._ninja = _env_ninja_command()
         if self._ninja is None:
@@ -772,8 +821,18 @@ class Project():
         if not any(self._build_dir.iterdir()):
             _add_ignore_files(self._build_dir)
 
+        # Cross build driven by the build frontend via the cross_build_wheel
+        # hook: the host Python is described by a PEP 739 build-details.json
+        # document that we hand to Meson through the python.build_config
+        # option, and the toolchain is described in a synthesized cross file.
+        if self._cross is not None:
+            self._cross.write_build_details(self._meson_build_details)
+            cross_file_data = self._cross.cross_file(self._meson_build_details)
+            self._meson_cross_file.write_text(cross_file_data, encoding='utf-8')
+            self._meson_args['setup'].extend(('--cross-file', os.fspath(self._meson_cross_file)))
+
         # setuptools-like ARCHFLAGS environment variable support
-        if sysconfig.get_platform().startswith('macosx-'):
+        elif sysconfig.get_platform().startswith('macosx-'):
             archflags = os.environ.get('ARCHFLAGS', '').strip()
             if archflags:
 
@@ -923,12 +982,13 @@ class Project():
             } if _PYPROJECT_METADATA_VERSION >= (0, 9) else {}
             self._metadata = Metadata(name=name, version=packaging.version.Version(version), **kwargs)
 
-        # verify that we are running on a supported interpreter
+        # verify that we are building for a supported interpreter
         if self._metadata.requires_python:
-            if not self._metadata.requires_python.contains(platform.python_version().rstrip('+'), prereleases=True):
+            python_version = self._cross.python_version if self._cross is not None else platform.python_version()
+            if not self._metadata.requires_python.contains(python_version.rstrip('+'), prereleases=True):
                 raise MesonBuilderError(
                     f'The package requires Python version {self._metadata.requires_python}, '
-                    f'running on {platform.python_version()}')
+                    f'{"building for" if self._cross is not None else "running on"} {python_version}')
 
         # limited API
         self._limited_api = pyproject_config.get('limited-api', False)
@@ -939,7 +999,13 @@ class Project():
             if not allow_limited_api:
                 self._limited_api = False
 
-        if self._limited_api and bool(sysconfig.get_config_var('Py_GIL_DISABLED')) and sys.version_info < (3, 15):
+        if self._cross is not None:
+            free_threaded = self._cross.is_free_threaded
+            version_info: Tuple[int, ...] = self._cross.version_info
+        else:
+            free_threaded = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+            version_info = sys.version_info[:3]
+        if self._limited_api and free_threaded and version_info < (3, 15):
             raise BuildError(
                 'The package targets Python\'s Limited API, which is not supported by free-threaded CPython before version '
                 '3.15. The "python.allow_limited_api" Meson build option may be used to override the package default.')
@@ -1201,7 +1267,8 @@ class Project():
     def wheel(self, directory: Path) -> pathlib.Path:
         """Generates a wheel in the specified directory."""
         self.build()
-        builder = _WheelBuilder(self._metadata, self._manifest, self._limited_api, self._allow_windows_shared_libs)
+        builder = _WheelBuilder(
+            self._metadata, self._manifest, self._limited_api, self._allow_windows_shared_libs, self._cross)
         return builder.build(directory)
 
     def editable(self, directory: Path) -> pathlib.Path:
@@ -1212,7 +1279,8 @@ class Project():
 
 
 @contextlib.contextmanager
-def _project(config_settings: Optional[Dict[Any, Any]] = None) -> Iterator[Project]:
+def _project(config_settings: Optional[Dict[Any, Any]] = None,
+             cross: Optional[mesonpy._cross.CrossBuild] = None) -> Iterator[Project]:
     """Create the project given the given config settings."""
 
     settings = _validate_config_settings(config_settings or {})
@@ -1224,7 +1292,7 @@ def _project(config_settings: Optional[Dict[Any, Any]] = None) -> Iterator[Proje
     with contextlib.ExitStack() as ctx:
         if build_dir is None:
             build_dir = ctx.enter_context(tempfile.TemporaryDirectory(prefix='.mesonpy-', dir=source_dir))
-        yield Project(source_dir, build_dir, meson_args, editable_verbose)
+        yield Project(source_dir, build_dir, meson_args, editable_verbose, cross)
 
 
 def _parse_version_string(string: str) -> Tuple[int, ...]:
@@ -1351,6 +1419,32 @@ def build_wheel(wheel_directory: str,
                 metadata_directory: Optional[str] = None) -> str:
     out = pathlib.Path(wheel_directory)
     with _project(config_settings) as project:
+        return project.wheel(out).name
+
+
+@_pyproject_hook
+def get_host_requires_for_cross_build_wheel(config_settings: Optional[Dict[str, str]] = None,
+                                            build_details: Optional[Dict[str, Any]] = None) -> List[str]:
+    # meson-python itself needs nothing installed for the host platform;
+    # projects list their host requirements in [build-system] host-requires.
+    return []
+
+
+@_pyproject_hook
+def cross_build_wheel(wheel_directory: str,
+                      config_settings: Optional[Dict[Any, Any]] = None,
+                      metadata_directory: Optional[str] = None,
+                      build_details: Optional[Dict[str, Any]] = None,
+                      host_requires_directory: Optional[str] = None,
+                      toolchain: Optional[Dict[str, str]] = None) -> str:
+    if build_details is None:
+        raise ConfigError('cross_build_wheel() requires the build_details argument')
+    try:
+        cross = mesonpy._cross.CrossBuild(build_details, host_requires_directory, toolchain)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    out = pathlib.Path(wheel_directory)
+    with _project(config_settings, cross) as project:
         return project.wheel(out).name
 
 

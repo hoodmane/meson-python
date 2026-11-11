@@ -8,6 +8,7 @@ py = import('python').find_installation()
 
 py.install_sources(
     'mesonpy/__init__.py',
+    'mesonpy/_cross.py',
     'mesonpy/_editable.py',
     'mesonpy/_rpath.py',
     'mesonpy/_tags.py',

@@ -204,7 +204,7 @@ def meson_fatal_warnings():
     mpatch = pytest.MonkeyPatch()
     mesonpy_project_init = mesonpy.Project.__init__
 
-    def __init__(self, source_dir, build_dir, meson_args=None, editable_verbose=None):
+    def __init__(self, source_dir, build_dir, meson_args=None, editable_verbose=None, cross=None):
         if pathlib.Path(source_dir).absolute().name not in {
 
                 # The CMake subproject emits ``WARNING: CMake Toolchain:
@@ -224,6 +224,6 @@ def meson_fatal_warnings():
             if meson_args is None:
                 meson_args = {}
             meson_args.setdefault('setup', []).append('--fatal-meson-warnings')
-        mesonpy_project_init(self, source_dir, build_dir, meson_args, editable_verbose)
+        mesonpy_project_init(self, source_dir, build_dir, meson_args, editable_verbose, cross)
 
     mpatch.setattr(mesonpy.Project, '__init__', __init__)
