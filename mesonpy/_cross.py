@@ -104,7 +104,7 @@ def _multiarch(build_details: Mapping[str, Any]) -> Optional[str]:
 
 
 class CrossBuild:
-    """Information about the host (target) Python extracted from ``build-details.json``.
+    """Information about the host Python extracted from ``build-details.json``.
 
     The build frontend passes this information to the ``cross_build_wheel``
     hook; this class interprets it for Meson and for wheel tag computation.
