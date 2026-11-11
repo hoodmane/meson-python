@@ -1389,20 +1389,39 @@ def get_requires_for_build_sdist(config_settings: Optional[Dict[str, str]] = Non
     return dependencies
 
 
-@_pyproject_hook
-def get_requires_for_build_wheel(config_settings: Optional[Dict[str, str]] = None) -> List[str]:
+def _get_requires_for_build_wheel(binary_format: str) -> List[str]:
     dependencies = []
 
     if os.environ.get('NINJA') is None and _env_ninja_command() is None:
         dependencies.append(f'ninja >= {_NINJA_REQUIRED_VERSION}')
 
-    if sys.platform.startswith('linux') and not shutil.which('patchelf'):
+    # patchelf is used to fix the rpath of ELF binaries. When cross
+    # compiling, patchelf is only run if the host binary format is the
+    # same as the build platform's, see _WheelBuilder._install_path().
+    if binary_format == 'elf' and _binary_format() == 'elf' and not shutil.which('patchelf'):
         dependencies.append('patchelf >= 0.11.0')
 
     return dependencies
 
 
+@_pyproject_hook
+def get_requires_for_build_wheel(config_settings: Optional[Dict[str, str]] = None) -> List[str]:
+    return _get_requires_for_build_wheel(_binary_format())
+
+
 get_requires_for_build_editable = get_requires_for_build_wheel
+
+
+@_pyproject_hook
+def get_build_requires_for_cross_build_wheel(config_settings: Optional[Dict[str, str]] = None,
+                                             build_details: Optional[Dict[str, Any]] = None) -> List[str]:
+    if build_details is None:
+        raise ConfigError('get_build_requires_for_cross_build_wheel() requires the build_details argument')
+    try:
+        cross = mesonpy._cross.CrossBuild(build_details)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    return _get_requires_for_build_wheel(cross.binary_format)
 
 
 @_pyproject_hook

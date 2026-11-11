@@ -186,6 +186,24 @@ def test_wheel_tag_cross_stable_abi_bad():
         str(builder.tag)
 
 
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Linux only')
+def test_get_build_requires_for_cross_build_wheel(monkeypatch):
+    monkeypatch.setenv('NINJA', 'ninja')
+    monkeypatch.setattr(shutil, 'which', lambda name: None)
+    # ELF host on an ELF build platform: patchelf is needed
+    assert mesonpy.get_build_requires_for_cross_build_wheel({}, build_details()) == ['patchelf >= 0.11.0']
+    # Mach-O host: rpath fixing is skipped, patchelf is not needed
+    macos = build_details('macosx-11.0-arm64', multiarch='darwin', extension_suffix='.cpython-314-darwin.so')
+    assert mesonpy.get_build_requires_for_cross_build_wheel({}, macos) == []
+    # same as get_requires_for_build_wheel when the host matches the build platform
+    assert mesonpy.get_requires_for_build_wheel({}) == ['patchelf >= 0.11.0']
+
+
+def test_get_build_requires_for_cross_build_wheel_requires_build_details():
+    with pytest.raises(SystemExit):
+        mesonpy.get_build_requires_for_cross_build_wheel({}, None)
+
+
 def test_cross_build_wheel_requires_build_details(package_pure, tmp_path):
     with pytest.raises(SystemExit):
         mesonpy.cross_build_wheel(os.fspath(tmp_path), build_details=None)
