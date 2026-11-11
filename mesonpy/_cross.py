@@ -344,14 +344,19 @@ class CrossBuild:
             properties.append(f'host_requires_directory = {quote(os.fspath(self.host_requires_directory))}')
         # Do not let pkg-config look into the build machine's system
         # directories when resolving dependencies for the host machine: only
-        # search our directories and whatever the toolchain declares.
+        # search our directories and whatever the toolchain declares. The
+        # toolchain description passed by the build frontend is the only
+        # source of this information; the environment is not consulted.
         pkg_config_libdir = list(pkg_config_paths)
         for var in ('PKG_CONFIG_LIBDIR', 'PKG_CONFIG_PATH'):
-            value = self.toolchain.get(var) or os.environ.get(var)
+            value = self.toolchain.get(var)
             if value:
                 pkg_config_libdir.extend(p for p in value.split(os.pathsep) if p)
         if pkg_config_libdir:
             properties.append(f'pkg_config_libdir = {quote_list(pkg_config_libdir)}')
+        sysroot = self.toolchain.get('PKG_CONFIG_SYSROOT_DIR')
+        if sysroot:
+            properties.append(f'sys_root = {quote(sysroot)}')
 
         return textwrap.dedent('''
             [binaries]

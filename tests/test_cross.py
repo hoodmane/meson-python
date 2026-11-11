@@ -138,8 +138,27 @@ def test_cross_file(tmp_path):
     assert f"host_requires_directory = '{host_requires}'" in text
     assert f"pkg_config_path = ['{host_requires / 'numpy' / '_core' / 'lib' / 'pkgconfig'}']" in text
     assert "c_args = ['-O2', '-g']" in text
+    assert 'sys_root' not in text
+    assert f"pkg_config_libdir = ['{host_requires / 'numpy' / '_core' / 'lib' / 'pkgconfig'}']" in text
     assert "c_link_args = ['-Wl,-z,relro']" in text
     assert "cpp_link_args = ['-Wl,-z,relro']" in text
+
+
+def test_cross_file_pkg_config_from_toolchain(tmp_path, monkeypatch):
+    # pkg-config search paths come from the toolchain description only, not from the environment
+    monkeypatch.setenv('PKG_CONFIG_LIBDIR', '/from-environment/pkgconfig')
+    toolchain = {
+        'PKG_CONFIG': 'aarch64-linux-gnu-pkg-config',
+        'PKG_CONFIG_LIBDIR': '/sysroot/usr/lib/pkgconfig:/sysroot/usr/share/pkgconfig',
+        'PKG_CONFIG_SYSROOT_DIR': '/sysroot',
+    }
+    cross = mesonpy._cross.CrossBuild(build_details(), None, toolchain)
+    details_path = tmp_path / 'build-details.json'
+    text = cross.cross_file(details_path)
+    assert "pkg-config = 'aarch64-linux-gnu-pkg-config'" in text
+    assert "pkg_config_libdir = ['/sysroot/usr/lib/pkgconfig', '/sysroot/usr/share/pkgconfig']" in text
+    assert "sys_root = '/sysroot'" in text
+    assert 'from-environment' not in text
 
 
 def test_cross_file_relative_base_prefix(tmp_path):
