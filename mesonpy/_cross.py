@@ -253,6 +253,13 @@ class CrossBuild:
     @property
     def platform_tag(self) -> str:
         platform = self.sysconfig_platform
+        if platform.startswith('emscripten-'):
+            # PEP 783: Pyodide wheels are tagged with the platform ABI version
+            # rather than the Emscripten version. build-details.json does not
+            # record it; accept it from a pyemscripten_platform_version key.
+            abi_version = self.build_details.get('pyemscripten_platform_version')
+            if abi_version:
+                return f'pyemscripten_{abi_version}_wasm32'
         if platform.startswith('macosx-'):
             # macosx-11.0-arm64: normalise the version the way _get_macosx_platform_tag() does.
             _, version, arch = platform.split('-', 2)

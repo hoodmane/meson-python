@@ -93,6 +93,14 @@ def test_cross_build_properties(details, system, cpu, cpu_family, binary_format,
     assert f'{cross.interpreter_tag}-{cross.abi_tag}-{cross.platform_tag}' == tag
 
 
+def test_cross_build_pyemscripten_tag():
+    details = build_details('emscripten-5.0.3-wasm32', multiarch='wasm32-emscripten',
+                            extension_suffix='.cpython-314-wasm32-emscripten.so')
+    assert mesonpy._cross.CrossBuild(details).platform_tag == 'emscripten_5_0_3_wasm32'
+    details['pyemscripten_platform_version'] = '2026_0'
+    assert mesonpy._cross.CrossBuild(details).platform_tag == 'pyemscripten_2026_0_wasm32'
+
+
 def test_cross_build_python_version():
     cross = mesonpy._cross.CrossBuild(build_details())
     assert cross.version_info == (3, 14)
